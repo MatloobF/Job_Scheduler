@@ -20,7 +20,7 @@ npm run dev
 
 `npm run worker` and `npm run reaper` exit with a message until those loops are implemented.
 
-`npm test` runs Vitest. The current tests are placeholders (`it.todo`) and do not need Postgres. Real tests must use `DATABASE_URL_TEST` and `tests/helpers.js` to truncate tables. Do not sleep to simulate time.
+`npm test` runs Vitest against the real `scheduler_test` database, so Postgres must be running. `tests/globalSetup.js` applies migrations before the suite. Tests use `DATABASE_URL_TEST` and `tests/helpers.js` to truncate tables. Do not sleep to simulate time.
 
 Postgres listens on `localhost:5433`. The Compose file creates `scheduler` and `scheduler_test`. Local credentials are in `.env.example`. Do not commit `.env`.
 

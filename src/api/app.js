@@ -14,9 +14,19 @@ export function createApp() {
   app.use('/jobs', jobsRouter);
 
   app.use((err, _req, res, _next) => {
+    // Raised by express.json() for a body that is not valid JSON.
+    if (err.type === 'entity.parse.failed') {
+      res.status(400).json({ error: { code: 'BAD_REQUEST', message: 'Request body is not valid JSON' } });
+      return;
+    }
     if (err instanceof ZodError) {
       res.status(400).json({
-        error: { code: 'BAD_REQUEST', message: err.issues.map((issue) => issue.message).join('; ') },
+        error: {
+          code: 'BAD_REQUEST',
+          message: err.issues
+            .map((issue) => (issue.path.length ? `${issue.path.join('.')}: ${issue.message}` : issue.message))
+            .join('; '),
+        },
       });
       return;
     }

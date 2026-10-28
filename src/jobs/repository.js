@@ -1,25 +1,56 @@
 import { notImplemented } from '../api/errors.js';
+import { pool } from '../db/pool.js';
 
 // Every jobs.status change lives here. Routes and the worker call these functions.
 // Multi-statement changes use withTransaction from src/db/pool.js.
 // Claim, renew, complete, fail, and reap must follow the invariants in CLAUDE.md.
 
-export async function insertJob(_input) {
-  throw notImplemented('insertJob');
+const LIST_LIMIT = 100;
+
+// A missing scheduledAt defaults to the DB's now(), never the app clock.
+export async function insertJob({ type, payload, priority, scheduledAt, maxRetries }) {
+  const { rows } = await pool.query(
+    `INSERT INTO jobs (type, payload, priority, scheduled_at, max_retries)
+     VALUES ($1, $2, $3, COALESCE($4::timestamptz, now()), $5)
+     RETURNING *`,
+    [type, payload, priority, scheduledAt ?? null, maxRetries],
+  );
+  return rows[0];
 }
 
-export async function getJobById(_id) {
-  throw notImplemented('getJobById');
+export async function getJobById(id) {
+  const { rows } = await pool.query('SELECT * FROM jobs WHERE id = $1', [id]);
+  return rows[0] ?? null;
 }
 
-export async function listJobsByStatus(_status) {
-  throw notImplemented('listJobsByStatus');
+// A null status lists every job. Newest first, capped so the response stays bounded.
+export async function listJobsByStatus(status) {
+  const { rows } = await pool.query(
+    `SELECT * FROM jobs
+     WHERE ($1::text IS NULL OR status = $1)
+     ORDER BY created_at DESC
+     LIMIT $2`,
+    [status ?? null, LIST_LIMIT],
+  );
+  return rows;
 }
 
-// Guarded update: WHERE id = $1 AND status = 'QUEUED'.
-// Return 'cancelled', 'missing', or 'not_queued'. The route maps those to 200, 404, 409.
-export async function cancelJob(_id) {
-  throw notImplemented('cancelJob');
+// Guarded update: only a QUEUED job can be cancelled. If a worker is claiming the
+// row at the same moment, this UPDATE waits for the claim's row lock, re-checks
+// status, finds RUNNING, and matches 0 rows, so cancel and claim cannot both win.
+// Returns { outcome: 'cancelled' | 'missing' | 'not_queued', job }.
+export async function cancelJob(id) {
+  const updated = await pool.query(
+    `UPDATE jobs SET status = 'CANCELLED', updated_at = now()
+     WHERE id = $1 AND status = 'QUEUED'
+     RETURNING *`,
+    [id],
+  );
+  if (updated.rowCount === 1) return { outcome: 'cancelled', job: updated.rows[0] };
+
+  // Only distinguishes 404 from 409; jobs are never deleted, so this cannot race to missing.
+  const existing = await getJobById(id);
+  return existing ? { outcome: 'not_queued', job: existing } : { outcome: 'missing', job: null };
 }
 
 // Single UPDATE ... WHERE id = (SELECT ... FOR UPDATE SKIP LOCKED LIMIT 1) RETURNING *.
