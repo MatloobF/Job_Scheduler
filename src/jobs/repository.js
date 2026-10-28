@@ -1,5 +1,6 @@
 import { notImplemented } from '../api/errors.js';
-import { pool } from '../db/pool.js';
+import { config } from '../config.js';
+import { pool, withTransaction } from '../db/pool.js';
 
 // Every jobs.status change lives here. Routes and the worker call these functions.
 // Multi-statement changes use withTransaction from src/db/pool.js.
@@ -53,12 +54,44 @@ export async function cancelJob(id) {
   return existing ? { outcome: 'not_queued', job: existing } : { outcome: 'missing', job: null };
 }
 
-// Single UPDATE ... WHERE id = (SELECT ... FOR UPDATE SKIP LOCKED LIMIT 1) RETURNING *.
-// Eligible: status = 'QUEUED' AND scheduled_at <= now(), order priority DESC, scheduled_at ASC.
-// Sets a new lease_id via gen_random_uuid(), increments attempts, status RUNNING.
+// Claims the best eligible job and opens its attempt row in one transaction.
 // Returns the claimed row, or null when nothing is eligible.
-export async function claimNextJob(_workerId) {
-  throw notImplemented('claimNextJob');
+export async function claimNextJob(workerId, leaseDurationMs = config.leaseDurationMs) {
+  return withTransaction(async (client) => {
+    // The subquery picks and row-locks one eligible job; the outer UPDATE claims it
+    // in the same statement, so there is no gap between choosing and claiming.
+    // SKIP LOCKED makes concurrent claimers pass over a row another claimer holds
+    // and take the next one instead of waiting for it and then matching nothing.
+    // Eligibility and lease expiry both use the DB clock (now()), never the app's.
+    const claimed = await client.query(
+      `UPDATE jobs
+       SET status = 'RUNNING',
+           attempts = attempts + 1,
+           lease_id = gen_random_uuid(),
+           worker_id = $1,
+           lease_expires_at = now() + ($2 * interval '1 millisecond'),
+           updated_at = now()
+       WHERE id = (
+         SELECT id FROM jobs
+         WHERE status = 'QUEUED' AND scheduled_at <= now()
+         ORDER BY priority DESC, scheduled_at ASC
+         LIMIT 1
+         FOR UPDATE SKIP LOCKED
+       )
+       RETURNING *`,
+      [workerId, leaseDurationMs],
+    );
+    if (claimed.rowCount === 0) return null;
+
+    const job = claimed.rows[0];
+    // Same transaction as the claim, so a job is never RUNNING without its attempt row.
+    await client.query(
+      `INSERT INTO job_attempts (job_id, attempt_no, lease_id, worker_id)
+       VALUES ($1, $2, $3, $4)`,
+      [job.id, job.attempts, job.lease_id, workerId],
+    );
+    return job;
+  });
 }
 
 // WHERE id = $1 AND lease_id = $2 AND status = 'RUNNING' AND lease_expires_at > now().

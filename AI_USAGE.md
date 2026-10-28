@@ -21,3 +21,10 @@ Append one short entry after each implementation step: what was generated, what 
 - Design choices: cancel is a single guarded `UPDATE ... WHERE id = $1 AND status = 'QUEUED'`; a follow-up SELECT only distinguishes 404 from 409. Missing `scheduledAt` defaults to DB `now()`. `maxRetries` is required and capped at 100 so `1 + max_retries` cannot overflow; `priority` defaults to 0. Payloads are `strict()` so unknown keys are rejected.
 - Also fixed in the scaffold: malformed JSON bodies and non-UUID ids returned 500, now 400; zod error messages now include the field path. Express 4 does not catch async errors, so routes use a small `asyncRoute` wrapper.
 - Verified: `tests/jobs.api.test.js`, 19 passing (submission, invalid payloads, get/list, 404/400, cancel 200/404/409, 5 concurrent cancels yield exactly one 200). "Does not claim a cancelled job" stays todo until claim exists.
+
+## Step 3: Atomic claim
+
+- Claude Code generated `claimNextJob`: one `UPDATE ... WHERE id = (SELECT ... FOR UPDATE SKIP LOCKED LIMIT 1) RETURNING *` plus the `job_attempts` insert, both inside `withTransaction` (two statements chosen over a CTE for readability).
+- Tests: `tests/claim.test.js` atomic-claim section (2 and 20 parallel claimers, deterministic SKIP LOCKED test holding a row lock, lease id + attempts, attempt row, DB-clock lease expiry, priority, scheduled_at ordering, future jobs, non-QUEUED statuses). API tests now use a real claim for the 409 case, plus "does not claim a cancelled job" and a cancel-vs-claim race.
+- Verified by mutation: removing `SKIP LOCKED` fails the locked-row test; removing the row lock entirely fails it and the 20-claimer test (20 "successful" claims for 10 jobs). The 2-claimer race test alone did not catch it, so it is evidence, not proof. The first mutation run hung the suite, so the locked-row test now has a 2 s watchdog that turns a block into a failure.
+- `npm test`: 30 passed, 15 todo.

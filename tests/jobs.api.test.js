@@ -2,6 +2,7 @@ import request from 'supertest';
 import { afterAll, beforeEach, describe, expect, it } from 'vitest';
 import { createApp } from '../src/api/app.js';
 import { closePool, pool } from '../src/db/pool.js';
+import { claimNextJob } from '../src/jobs/repository.js';
 import { truncateAll } from './helpers.js';
 
 const app = createApp();
@@ -158,8 +159,7 @@ describe('cancellation', () => {
 
   it('returns 409 when cancelling a RUNNING job', async () => {
     const job = await createJob();
-    // Stand-in for a claim until claimNextJob exists; tests may set up state directly.
-    await pool.query(`UPDATE jobs SET status = 'RUNNING' WHERE id = $1`, [job.id]);
+    await claimNextJob('worker-a');
 
     const res = await request(app).post(`/jobs/${job.id}/cancel`);
 
@@ -188,5 +188,28 @@ describe('cancellation', () => {
     expect(statuses).toEqual([200, 409, 409, 409, 409]);
   });
 
-  it.todo('does not claim a cancelled job');
+  it('does not claim a cancelled job', async () => {
+    const job = await createJob();
+    await request(app).post(`/jobs/${job.id}/cancel`).expect(200);
+
+    expect(await claimNextJob('worker-a')).toBeNull();
+  });
+
+  it('lets exactly one of a racing cancel and claim win', async () => {
+    const job = await createJob();
+
+    const [cancelRes, claimed] = await Promise.all([
+      request(app).post(`/jobs/${job.id}/cancel`),
+      claimNextJob('worker-a'),
+    ]);
+
+    const { rows } = await pool.query('SELECT status FROM jobs WHERE id = $1', [job.id]);
+    if (claimed) {
+      expect(cancelRes.status).toBe(409);
+      expect(rows[0].status).toBe('RUNNING');
+    } else {
+      expect(cancelRes.status).toBe(200);
+      expect(rows[0].status).toBe('CANCELLED');
+    }
+  });
 });
