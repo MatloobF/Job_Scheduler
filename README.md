@@ -16,9 +16,9 @@ npm run migrate
 npm run dev
 ```
 
-`npm run seed` inserts sample `sales` rows. It fails until a later migration creates `sales(id SERIAL PRIMARY KEY, category TEXT NOT NULL, amount NUMERIC NOT NULL)`.
+`npm run seed` inserts sample `sales` rows for `GENERATE_REPORT`.
 
-`npm run worker` and `npm run reaper` exit with a message until those loops are implemented.
+`npm run worker` starts a worker (set `WORKER_ID` to run several). `npm run reaper` starts the lease reaper. Stop either with Ctrl+C; the worker finishes its current job first.
 
 `npm test` runs Vitest against the real `scheduler_test` database, so Postgres must be running. `tests/globalSetup.js` applies migrations before the suite. Tests use `DATABASE_URL_TEST` and `tests/helpers.js` to truncate tables. Do not sleep to simulate time.
 

@@ -44,3 +44,13 @@ Append one short entry after each implementation step: what was generated, what 
 - Verified by mutation: removing `SKIP LOCKED` fails the locked-row test; removing the expiry predicate fails 2 tests. The concurrent-reapers test still passed without `SKIP LOCKED`: `FOR UPDATE` alone prevents double reaping, `SKIP LOCKED` prevents blocking.
 - Smoke test: `node src/worker/reaper.js` reaped a planted expired job in the dev DB. Graceful SIGINT/SIGTERM shutdown was not verified: on Windows, `child.kill('SIGTERM')` terminates the process without running handlers.
 - `npm test`: 56 passed, 4 todo.
+
+## Step 6: Worker and handlers
+
+- Claude Code generated both handlers, `src/worker/simulation.js` (failure flags), and the worker: `processNextJob` (claim, run, record), lease renewal every `leaseDurationMs / 3`, `runWorker` / `stop` with graceful shutdown.
+- Design choices: the handler's write and the fenced `completeJob` share one transaction. A failed renewal sets a flag checked before complete, because `completeJob` alone accepts an expired but unreaped lease. `simulateCrashAfterWork` throws `SimulatedCrashError`; the worker process turns it into `process.exit(1)` inside the open transaction, tests see a rejection.
+- Bugs caught by the new tests and fixed: `runJob` passed `SimulatedCrashError` to `failJob` (a crash was recorded as a failure); the loop could wait a full poll interval after `stop()` landed during an empty claim. An idle-wake test based on timer counts was flaky (pg schedules its own timers) and was rewritten to spy on `setTimeout`.
+- Tests: `execution.test.js` handler effects, empty sales, handler reruns leave one notification / one refreshed report. `tests/worker.test.js`: simulated failure, simulated crash then reaper to FAILED, run reaped and reclaimed mid-execution (handler blocked on a held `sales` lock) is discarded, renewal failure records nothing (fake `setInterval`), two concurrent workers run 5 jobs once each, stop() finishes the current job, stop() wakes an idle poll. No sleeps.
+- Verified by mutation: removing the lease-lost check fails the renewal test; committing the side effect before complete fails the reaped-mid-run test. Full suite passed 3 consecutive runs.
+- End-to-end smoke test (real API, worker, reaper processes on the dev DB): two jobs succeeded, the crash job's real `exit(1)` left no notification, the reaper marked it FAILED. Graceful Ctrl+C shutdown still unverified on Windows.
+- `npm test`: 68 passed, 0 todo.

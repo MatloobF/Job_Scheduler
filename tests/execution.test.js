@@ -3,7 +3,11 @@ import { StaleLeaseError } from '../src/api/errors.js';
 import { config } from '../src/config.js';
 import { closePool, pool, withTransaction } from '../src/db/pool.js';
 import { claimNextJob, completeJob, failJob } from '../src/jobs/repository.js';
+import { seed } from '../src/db/seed.js';
 import { backoffDelayMs } from '../src/jobs/retryPolicy.js';
+import { generateReport } from '../src/worker/handlers/generateReport.js';
+import { sendNotification } from '../src/worker/handlers/sendNotification.js';
+import { processNextJob } from '../src/worker/worker.js';
 import { createTestJob, expireLease, makeDue, truncateAll } from './helpers.js';
 
 async function jobRow(id) {
@@ -41,9 +45,63 @@ async function claimAndFail(jobId, message) {
 beforeEach(truncateAll);
 afterAll(closePool);
 
+const notificationPayload = { recipient: 'a@example.com', message: 'hello' };
+
+// Runs a handler for an already-claimed job in its own transaction, as a repeat would.
+function runHandler(handler, job) {
+  return withTransaction((client) => handler(client, job));
+}
+
+async function count(table) {
+  const { rows } = await pool.query(`SELECT count(*)::int AS n FROM ${table}`);
+  return rows[0].n;
+}
+
 describe('execution', () => {
-  it.todo('records a notification for SEND_NOTIFICATION');
-  it.todo('persists a sales summary for GENERATE_REPORT');
+  it('records a notification for SEND_NOTIFICATION', async () => {
+    const job = await createTestJob({ type: 'SEND_NOTIFICATION', payload: notificationPayload });
+
+    expect(await processNextJob('worker-a')).toEqual({ jobId: job.id, outcome: 'succeeded' });
+
+    const { rows } = await pool.query('SELECT * FROM notifications');
+    expect(rows).toHaveLength(1);
+    expect(rows[0]).toMatchObject({ job_id: job.id, recipient: 'a@example.com', message: 'hello' });
+    expect(await jobRow(job.id)).toMatchObject({
+      status: 'SUCCEEDED',
+      result: { recipient: 'a@example.com', delivered: true, duplicate: false },
+    });
+  });
+
+  it('persists a sales summary for GENERATE_REPORT', async () => {
+    await seed();
+    const job = await createTestJob({ type: 'GENERATE_REPORT', payload: {} });
+
+    expect((await processNextJob('worker-a')).outcome).toBe('succeeded');
+
+    const { rows } = await pool.query('SELECT * FROM reports WHERE job_id = $1', [job.id]);
+    expect(rows[0]).toMatchObject({
+      row_count: 4,
+      total_amount: '35',
+      totals_by_category: { widgets: 25, gadgets: 10 },
+    });
+    expect((await jobRow(job.id)).result).toEqual({
+      rowCount: 4,
+      totalAmount: '35',
+      totalsByCategory: { widgets: 25, gadgets: 10 },
+    });
+  });
+
+  it('reports zeros, not nulls, when there are no sales', async () => {
+    const job = await createTestJob({ type: 'GENERATE_REPORT', payload: {} });
+
+    await processNextJob('worker-a');
+
+    expect((await jobRow(job.id)).result).toEqual({
+      rowCount: 0,
+      totalAmount: '0',
+      totalsByCategory: {},
+    });
+  });
 
   it('marks the job SUCCEEDED and stores the result', async () => {
     const job = await createTestJob();
@@ -148,8 +206,37 @@ describe('retries', () => {
 });
 
 describe('idempotency', () => {
-  it.todo('does not insert a second notification when the same job runs again');
-  it.todo('does not insert a second report when the same job runs again');
+  it('does not insert a second notification when the same job runs again', async () => {
+    const created = await createTestJob({
+      type: 'SEND_NOTIFICATION',
+      payload: notificationPayload,
+    });
+    const job = await claimNextJob('worker-a');
+    expect(job.id).toBe(created.id);
+
+    const first = await runHandler(sendNotification, job);
+    const second = await runHandler(sendNotification, job);
+
+    expect(first.duplicate).toBe(false);
+    expect(second.duplicate).toBe(true);
+    expect(await count('notifications')).toBe(1);
+  });
+
+  it('does not insert a second report when the same job runs again', async () => {
+    await seed();
+    await createTestJob({ type: 'GENERATE_REPORT', payload: {} });
+    const job = await claimNextJob('worker-a');
+
+    await runHandler(generateReport, job);
+    await pool.query(`INSERT INTO sales (category, amount) VALUES ('gizmos', 5)`);
+    const rerun = await runHandler(generateReport, job);
+
+    expect(await count('reports')).toBe(1);
+    // The repeat refreshed the existing row rather than adding one.
+    expect(rerun).toMatchObject({ rowCount: 5, totalAmount: '40' });
+    const { rows } = await pool.query('SELECT total_amount FROM reports WHERE job_id = $1', [job.id]);
+    expect(rows[0].total_amount).toBe('40');
+  });
 
   it('a stale worker cannot mark a newer attempt successful', async () => {
     const job = await createTestJob();

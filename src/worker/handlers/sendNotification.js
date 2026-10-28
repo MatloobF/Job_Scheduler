@@ -1,8 +1,20 @@
-import { notImplemented } from '../../api/errors.js';
+import { crashAfterWork, failBeforeWork } from '../simulation.js';
 
 // payload: { recipient, message, simulateFailure?, simulateCrashAfterWork? }
-// Insert into notifications with ON CONFLICT (job_id) DO NOTHING (or DO UPDATE).
-// Prefer running this write in the same transaction as the fenced complete.
-export async function sendNotification(_client, _job) {
-  throw notImplemented('sendNotification');
+// Runs inside the worker's transaction, together with the fenced completeJob.
+export async function sendNotification(client, job) {
+  const { recipient, message } = job.payload;
+  failBeforeWork(job.payload);
+
+  // One notification per job: a repeated execution hits the job_id key and writes
+  // nothing. If another attempt's insert is still uncommitted, this waits for it.
+  const inserted = await client.query(
+    `INSERT INTO notifications (job_id, recipient, message)
+     VALUES ($1, $2, $3)
+     ON CONFLICT (job_id) DO NOTHING`,
+    [job.id, recipient, message],
+  );
+
+  crashAfterWork(job.payload);
+  return { recipient, delivered: true, duplicate: inserted.rowCount === 0 };
 }
