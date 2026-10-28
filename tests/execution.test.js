@@ -8,7 +8,13 @@ import { backoffDelayMs } from '../src/jobs/retryPolicy.js';
 import { generateReport } from '../src/worker/handlers/generateReport.js';
 import { sendNotification } from '../src/worker/handlers/sendNotification.js';
 import { processNextJob } from '../src/worker/worker.js';
-import { createTestJob, expireLease, makeDue, truncateAll } from './helpers.js';
+import {
+  createTestJob,
+  expireLease,
+  makeDue,
+  truncateAll,
+  waitForBlockedQuery,
+} from './helpers.js';
 
 async function jobRow(id) {
   const { rows } = await pool.query('SELECT * FROM jobs WHERE id = $1', [id]);
@@ -130,6 +136,15 @@ describe('execution', () => {
     expect((await jobRow(job.id)).result).toEqual([1, 2, 3]);
   });
 
+  it('stores a missing result as JSON null', async () => {
+    const job = await createTestJob();
+    const claimed = await claimNextJob('worker-a');
+
+    await completeJob(job.id, claimed.lease_id, undefined);
+
+    expect(await jobRow(job.id)).toMatchObject({ status: 'SUCCEEDED', result: null });
+  });
+
   it('completes an expired lease that nobody has reaped or reclaimed', async () => {
     const job = await createTestJob();
     const claimed = await claimNextJob('worker-a');
@@ -174,6 +189,26 @@ describe('retries', () => {
     await makeDue(job.id);
     await claimAndFail(job.id, 'fail 2');
     expect(await scheduledDelayMs(job.id)).toBe(backoffDelayMs(2, base, cap));
+  });
+
+  it('caps the backoff delay once doubling passes the cap', async () => {
+    const { backoffBaseMs: base, backoffCapMs: cap } = config;
+    // Enough failures for base * 2^(n-1) to pass the cap, plus one more at the cap.
+    let failures = 1;
+    while (base * 2 ** (failures - 1) < cap) failures += 1;
+    failures += 1;
+    const job = await createTestJob({ maxRetries: failures });
+
+    const delays = [];
+    for (let attempt = 1; attempt <= failures; attempt += 1) {
+      await claimAndFail(job.id, `fail ${attempt}`);
+      delays.push(await scheduledDelayMs(job.id));
+      await makeDue(job.id);
+    }
+
+    expect(delays).toEqual(delays.map((_, i) => backoffDelayMs(i + 1, base, cap)));
+    expect(delays.slice(-2)).toEqual([cap, cap]);
+    expect(delays[0]).toBe(base);
   });
 
   it('permanently fails when maxRetries is 0 and the first attempt fails', async () => {
@@ -236,6 +271,48 @@ describe('idempotency', () => {
     expect(rerun).toMatchObject({ rowCount: 5, totalAmount: '40' });
     const { rows } = await pool.query('SELECT total_amount FROM reports WHERE job_id = $1', [job.id]);
     expect(rows[0].total_amount).toBe('40');
+  });
+
+  it('keeps one notification when two attempts insert it at the same time', async () => {
+    await createTestJob({ type: 'SEND_NOTIFICATION', payload: notificationPayload });
+    const job = await claimNextJob('worker-a');
+
+    const first = await pool.connect();
+    try {
+      await first.query('BEGIN');
+      await sendNotification(first, job);
+
+      // The second insert targets the same job_id and must wait for the first to finish.
+      const second = runHandler(sendNotification, job);
+      await waitForBlockedQuery('%INSERT INTO notifications%');
+      await first.query('COMMIT');
+
+      expect((await second).duplicate).toBe(true);
+    } finally {
+      first.release();
+    }
+    expect(await count('notifications')).toBe(1);
+  });
+
+  it('lets the waiting attempt write the notification if the first one rolls back', async () => {
+    await createTestJob({ type: 'SEND_NOTIFICATION', payload: notificationPayload });
+    const job = await claimNextJob('worker-a');
+
+    const first = await pool.connect();
+    try {
+      await first.query('BEGIN');
+      await sendNotification(first, job);
+
+      const second = runHandler(sendNotification, job);
+      await waitForBlockedQuery('%INSERT INTO notifications%');
+      // e.g. the first attempt's fenced complete failed as stale.
+      await first.query('ROLLBACK');
+
+      expect((await second).duplicate).toBe(false);
+    } finally {
+      first.release();
+    }
+    expect(await count('notifications')).toBe(1);
   });
 
   it('a stale worker cannot mark a newer attempt successful', async () => {

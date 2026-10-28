@@ -2,8 +2,8 @@ import request from 'supertest';
 import { afterAll, beforeEach, describe, expect, it } from 'vitest';
 import { createApp } from '../src/api/app.js';
 import { closePool, pool } from '../src/db/pool.js';
-import { claimNextJob } from '../src/jobs/repository.js';
-import { truncateAll } from './helpers.js';
+import { claimNextJob, completeJob, failJob } from '../src/jobs/repository.js';
+import { makeDue, truncateAll } from './helpers.js';
 
 const app = createApp();
 
@@ -102,6 +102,50 @@ describe('job submission', () => {
     expect(res.body.error.code).toBe('BAD_REQUEST');
   });
 
+  it('rejects a body sent without a JSON content type', async () => {
+    const res = await request(app)
+      .post('/jobs')
+      .set('Content-Type', 'text/plain')
+      .send(JSON.stringify(notificationJob));
+    expect(res.status).toBe(400);
+  });
+
+  it('accepts priority at the INTEGER limit and rejects one past it', async () => {
+    const atLimit = await request(app).post('/jobs').send({ ...notificationJob, priority: 2147483647 });
+    const pastLimit = await request(app)
+      .post('/jobs')
+      .send({ ...notificationJob, priority: 2147483648 });
+
+    expect(atLimit.status).toBe(201);
+    expect(pastLimit.status).toBe(400);
+  });
+
+  it('accepts maxRetries 100 and rejects 101', async () => {
+    const atCap = await request(app).post('/jobs').send({ ...notificationJob, maxRetries: 100 });
+    const pastCap = await request(app).post('/jobs').send({ ...notificationJob, maxRetries: 101 });
+
+    expect(atCap.status).toBe(201);
+    expect(pastCap.status).toBe(400);
+  });
+
+  it('rejects a scheduledAt without a timezone or that is not a timestamp', async () => {
+    const noZone = await request(app)
+      .post('/jobs')
+      .send({ ...notificationJob, scheduledAt: '2030-01-01T00:00:00' });
+    const garbage = await request(app)
+      .post('/jobs')
+      .send({ ...notificationJob, scheduledAt: 'tomorrow' });
+
+    expect(noZone.status).toBe(400);
+    expect(garbage.status).toBe(400);
+  });
+
+  it('makes a job with a past scheduledAt claimable immediately', async () => {
+    const job = await createJob({ ...notificationJob, scheduledAt: '2000-01-01T00:00:00Z' });
+
+    expect((await claimNextJob('worker-a')).id).toBe(job.id);
+  });
+
   it('gets a job by id', async () => {
     const created = await createJob();
 
@@ -186,6 +230,35 @@ describe('cancellation', () => {
 
     const statuses = responses.map((res) => res.status).sort();
     expect(statuses).toEqual([200, 409, 409, 409, 409]);
+  });
+
+  it('cancels a job waiting out its retry backoff, which is then never claimed', async () => {
+    const job = await createJob();
+    const claimed = await claimNextJob('worker-a');
+    await failJob(job.id, claimed.lease_id, 'transient');
+
+    const res = await request(app).post(`/jobs/${job.id}/cancel`);
+
+    expect(res.status).toBe(200);
+    await makeDue(job.id);
+    expect(await claimNextJob('worker-a')).toBeNull();
+  });
+
+  it('returns 409 when cancelling a SUCCEEDED or FAILED job', async () => {
+    const succeeded = await createJob({ ...notificationJob, priority: 9 });
+    const failed = await createJob({ ...notificationJob, priority: 1, maxRetries: 0 });
+    const first = await claimNextJob('worker-a');
+    await completeJob(succeeded.id, first.lease_id, {});
+    const second = await claimNextJob('worker-a');
+    await failJob(failed.id, second.lease_id, 'boom');
+
+    const cancelSucceeded = await request(app).post(`/jobs/${succeeded.id}/cancel`);
+    const cancelFailed = await request(app).post(`/jobs/${failed.id}/cancel`);
+
+    expect(cancelSucceeded.status).toBe(409);
+    expect(cancelSucceeded.body.error.message).toContain('SUCCEEDED');
+    expect(cancelFailed.status).toBe(409);
+    expect(cancelFailed.body.error.message).toContain('FAILED');
   });
 
   it('does not claim a cancelled job', async () => {

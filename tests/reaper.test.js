@@ -154,7 +154,7 @@ describe('lease reaper', () => {
     expect(nextPass.map((row) => row.id)).toEqual([lockedId]);
   });
 
-  it('reaps each job exactly once when reapers run concurrently', async () => {
+  it('never reaps a job twice when reapers run concurrently', async () => {
     const ids = await expiredJobs(10);
 
     const passes = await Promise.all([

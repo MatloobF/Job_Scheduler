@@ -5,7 +5,13 @@ import { seed } from '../src/db/seed.js';
 import { claimNextJob, reapExpiredLeases } from '../src/jobs/repository.js';
 import { SimulatedCrashError } from '../src/worker/simulation.js';
 import { processNextJob, runWorker, stop } from '../src/worker/worker.js';
-import { createTestJob, expireLease, makeDue, truncateAll } from './helpers.js';
+import {
+  createTestJob,
+  expireLease,
+  makeDue,
+  truncateAll,
+  waitForBlockedQuery,
+} from './helpers.js';
 
 const notificationPayload = { recipient: 'a@example.com', message: 'hello' };
 
@@ -39,19 +45,9 @@ async function holdSalesLock() {
   };
 }
 
-// Waits until the handler is actually blocked on the sales lock (observed in Postgres).
-async function waitUntilHandlerBlocked() {
-  await vi.waitFor(
-    async () => {
-      const { rows } = await pool.query(
-        `SELECT count(*)::int AS n FROM pg_stat_activity
-         WHERE datname = current_database() AND wait_event_type = 'Lock'
-           AND query LIKE '%FROM sales%'`,
-      );
-      expect(rows[0].n).toBe(1);
-    },
-    { timeout: 5000, interval: 20 },
-  );
+// Waits until the report handler is actually blocked on the sales lock.
+function waitUntilHandlerBlocked() {
+  return waitForBlockedQuery('%FROM sales%');
 }
 
 // Drains the queue the way a worker loop would, until nothing is eligible.
@@ -176,8 +172,61 @@ describe('worker failure handling', () => {
   });
 });
 
+describe('worker lease renewal and dispatch', () => {
+  it('renews the lease while the handler runs and then completes', async () => {
+    vi.useFakeTimers({ toFake: ['setInterval', 'clearInterval'] });
+    const job = await createTestJob({ type: 'GENERATE_REPORT', payload: {} });
+    const release = await holdSalesLock();
+
+    let run;
+    try {
+      run = processNextJob('worker-a');
+      await waitUntilHandlerBlocked();
+
+      // Shorten the live lease, then fire one renewal tick.
+      await pool.query(
+        `UPDATE jobs SET lease_expires_at = now() + interval '1 second' WHERE id = $1`,
+        [job.id],
+      );
+      await vi.advanceTimersByTimeAsync(Math.floor(config.leaseDurationMs / 3));
+
+      // Renewal pushed the expiry back out to a full lease duration (DB clock).
+      await vi.waitFor(
+        async () => {
+          const { rows } = await pool.query(
+            `SELECT lease_expires_at > now() + ($2 * interval '1 millisecond') AS renewed
+             FROM jobs WHERE id = $1`,
+            [job.id, config.leaseDurationMs / 2],
+          );
+          expect(rows[0].renewed).toBe(true);
+        },
+        { timeout: 5000 },
+      );
+    } finally {
+      await release();
+    }
+
+    expect((await run).outcome).toBe('succeeded');
+    expect((await jobRow(job.id)).status).toBe('SUCCEEDED');
+  });
+
+  it('fails a job whose type has no handler instead of crashing', async () => {
+    // Bypasses API validation, e.g. a row left behind by an older deployment.
+    const { rows } = await pool.query(
+      `INSERT INTO jobs (type, payload, max_retries) VALUES ('LEGACY_TYPE', '{}', 1) RETURNING id`,
+    );
+
+    expect((await processNextJob('worker-a')).outcome).toBe('failed');
+
+    expect(await jobRow(rows[0].id)).toMatchObject({
+      status: 'QUEUED',
+      last_error: 'No handler for job type LEGACY_TYPE',
+    });
+  });
+});
+
 describe('worker loop', () => {
-  it('runs every job exactly once across two concurrent workers', async () => {
+  it('never runs a job twice across two concurrent workers when nothing fails', async () => {
     const ids = [];
     for (let i = 0; i < 5; i += 1) {
       const job = await createTestJob({
