@@ -22,7 +22,7 @@ npm run dev
 
 `npm test` runs Vitest. The current tests are placeholders (`it.todo`) and do not need Postgres. Real tests must use `DATABASE_URL_TEST` and `tests/helpers.js` to truncate tables. Do not sleep to simulate time.
 
-Postgres listens on `localhost:5432`. The Compose file creates `scheduler` and `scheduler_test`. Local credentials are in `.env.example`. Do not commit `.env`.
+Postgres listens on `localhost:5433`. The Compose file creates `scheduler` and `scheduler_test`. Local credentials are in `.env.example`. Do not commit `.env`.
 
 ## What to implement
 
