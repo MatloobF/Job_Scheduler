@@ -1,4 +1,4 @@
-import { notImplemented, StaleLeaseError } from '../api/errors.js';
+import { StaleLeaseError } from '../api/errors.js';
 import { config } from '../config.js';
 import { pool, withTransaction } from '../db/pool.js';
 import { backoffDelayMs, shouldRetry } from './retryPolicy.js';
@@ -185,8 +185,41 @@ async function closeAttempt(client, leaseId, outcome, error) {
   );
 }
 
-// Expired RUNNING leases become QUEUED (with backoff) or FAILED.
-// Mark the open attempt LEASE_EXPIRED. A requeued job must be claimable again.
-export async function reapExpiredLeases() {
-  throw notImplemented('reapExpiredLeases');
+const REAP_BATCH_SIZE = 100;
+
+// Expired RUNNING leases become QUEUED (with backoff) or FAILED, and their open
+// attempt becomes LEASE_EXPIRED. Works in short batches until the backlog is drained,
+// so row locks are held briefly. Returns the reaped rows.
+export async function reapExpiredLeases(batchSize = REAP_BATCH_SIZE) {
+  const reaped = [];
+  for (;;) {
+    const batch = await reapBatch(batchSize);
+    reaped.push(...batch);
+    if (batch.length < batchSize) return reaped;
+  }
+}
+
+async function reapBatch(batchSize) {
+  return withTransaction(async (client) => {
+    // Expiry is judged by the DB clock only. SKIP LOCKED passes over rows a worker
+    // is completing or failing right now (they are about to leave RUNNING anyway)
+    // and lets several reapers run at once without reaping a job twice.
+    const expired = await client.query(
+      `SELECT id, lease_id, attempts, max_retries, worker_id FROM jobs
+       WHERE status = 'RUNNING' AND lease_expires_at <= now()
+       ORDER BY lease_expires_at
+       LIMIT $1
+       FOR UPDATE SKIP LOCKED`,
+      [batchSize],
+    );
+
+    // The expired run already counted as an attempt at claim time, so this applies
+    // the same retry rule as failJob without incrementing attempts again.
+    const reaped = [];
+    for (const job of expired.rows) {
+      const message = `lease expired (worker ${job.worker_id})`;
+      reaped.push(await retryOrFail(client, job, message, 'LEASE_EXPIRED'));
+    }
+    return reaped;
+  });
 }

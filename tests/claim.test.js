@@ -217,7 +217,5 @@ describe('leases and stale workers', () => {
       StaleLeaseError,
     );
   });
-  it.todo('requeues a job whose lease has expired and still has retries');
-  it.todo('permanently fails an expired lease when retries are exhausted');
-  it.todo('does not leave the job RUNNING after the reaper runs');
+  // Lease-expiry recovery is covered in tests/reaper.test.js.
 });
