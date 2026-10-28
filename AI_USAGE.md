@@ -62,3 +62,8 @@ Append one short entry after each implementation step: what was generated, what 
 - Static checks: no `new Date` / `Date.now` in `src`, no interpolated SQL in `src`, no `jobs.status` writes outside the repository. Renamed two test names that read as "exactly once" claims.
 - Left uncovered on purpose: `recordFailure` when the job is reaped between handler failure and `failJob` (microsecond window, needs a test-only hook), the worker loop's DB-unreachable path, the unreachable 0-rows branch in `retryOrFail`, and process entry points (`server.js`, `reaper.js`, worker `isMain` block; exercised by the smoke tests instead).
 - Coverage: repository 100% statements / 98% branches, handlers, validation, routes, retry policy 100%, worker 86% / 91%. `npm test`: 81 passed, 3 consecutive runs.
+
+## Step 8: README
+
+- Claude Code drafted the README engineering notes (architecture and schema, claim safety, leases and fencing, retry and idempotency, crash-point table, limitations, AI usage and verification) plus setup, configuration and API reference, from the implemented code and the test and mutation results recorded above.
+- Checked against the code: claim SQL copied from `repository.js`, fence table matches each function's WHERE clause, test count (81) and mutation results match the runs logged in steps 3–7, and the only "exactly-once" wording is a negation.
