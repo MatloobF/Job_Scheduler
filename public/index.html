@@ -1,0 +1,349 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Job scheduler</title>
+  <style>
+    :root {
+      color-scheme: light;
+      --bg: #f4f1ea;
+      --ink: #1c1915;
+      --muted: #5c564c;
+      --line: #d9d1c3;
+      --panel: #fffdf8;
+      --accent: #0f6e56;
+      --accent-ink: #fff;
+      --danger: #8f2d2d;
+      --ok: #0f6e56;
+      --warn: #8a5a00;
+    }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      font: 15px/1.45 "Segoe UI", sans-serif;
+      color: var(--ink);
+      background: var(--bg);
+    }
+    header, main { width: min(1100px, calc(100% - 32px)); margin: 0 auto; }
+    header { padding: 28px 0 8px; }
+    h1 { margin: 0 0 4px; font-size: 28px; font-weight: 650; letter-spacing: -0.03em; }
+    h2 { margin: 0 0 12px; font-size: 16px; }
+    p.lede { margin: 0; color: var(--muted); }
+    .layout { display: grid; grid-template-columns: 320px 1fr; gap: 16px; padding: 16px 0 40px; }
+    .panel {
+      background: var(--panel);
+      border: 1px solid var(--line);
+      border-radius: 12px;
+      padding: 16px;
+    }
+    label { display: block; margin: 10px 0 4px; font-size: 13px; color: var(--muted); }
+    input, select, button, textarea {
+      font: inherit;
+      color: inherit;
+    }
+    input, select {
+      width: 100%;
+      padding: 8px 10px;
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      background: #fff;
+    }
+    .checks { display: flex; flex-direction: column; gap: 6px; margin: 12px 0; font-size: 14px; }
+    .checks label { margin: 0; color: var(--ink); }
+    button {
+      border: 0;
+      border-radius: 8px;
+      padding: 8px 12px;
+      background: var(--accent);
+      color: var(--accent-ink);
+      cursor: pointer;
+    }
+    button.secondary { background: transparent; color: var(--ink); border: 1px solid var(--line); }
+    button.danger { background: var(--danger); }
+    button:disabled { opacity: 0.5; cursor: not-allowed; }
+    .row { display: flex; gap: 8px; align-items: center; }
+    .row > * { flex: 1; }
+    .banner {
+      margin: 12px 0 0;
+      padding: 10px 12px;
+      border-radius: 8px;
+      background: #f8e8e4;
+      color: var(--danger);
+    }
+    .banner.ok { background: #e5f4ef; color: var(--ok); }
+    table { width: 100%; border-collapse: collapse; font-size: 13px; }
+    th, td { text-align: left; padding: 8px 6px; border-bottom: 1px solid var(--line); vertical-align: top; }
+    th { color: var(--muted); font-weight: 600; }
+    tr { cursor: pointer; }
+    tr[aria-selected="true"] { background: #e7f3ee; }
+    .status {
+      display: inline-block;
+      padding: 1px 7px;
+      border-radius: 999px;
+      background: #eee;
+      font-size: 12px;
+    }
+    .status.QUEUED { background: #fff1cc; color: var(--warn); }
+    .status.RUNNING { background: #e3eefc; color: #1d4e89; }
+    .status.SUCCEEDED { background: #e5f4ef; color: var(--ok); }
+    .status.FAILED, .status.CANCELLED { background: #f8e8e4; color: var(--danger); }
+    pre {
+      margin: 12px 0 0;
+      padding: 12px;
+      overflow: auto;
+      background: #1c1915;
+      color: #f4f1ea;
+      border-radius: 8px;
+      font-size: 12px;
+    }
+    .toolbar { display: flex; gap: 8px; margin-bottom: 12px; }
+    .toolbar select { max-width: 180px; }
+    @media (max-width: 800px) {
+      .layout { grid-template-columns: 1fr; }
+    }
+  </style>
+</head>
+<body>
+  <header>
+    <h1>Job scheduler</h1>
+    <p class="lede">Creates, lists, and cancels jobs through this server's <code>/jobs</code> API. <span id="health">Checking health…</span></p>
+  </header>
+  <main class="layout">
+    <section class="panel">
+      <h2>Create job</h2>
+      <form id="create-form">
+        <label for="type">Type</label>
+        <select id="type" name="type">
+          <option value="SEND_NOTIFICATION">SEND_NOTIFICATION</option>
+          <option value="GENERATE_REPORT">GENERATE_REPORT</option>
+        </select>
+
+        <div id="notification-fields">
+          <label for="recipient">Recipient</label>
+          <input id="recipient" name="recipient" value="qa@example.com" autocomplete="off">
+          <label for="message">Message</label>
+          <input id="message" name="message" value="Hello from the test page" autocomplete="off">
+        </div>
+
+        <label for="priority">Priority <span>(higher runs first, default 0)</span></label>
+        <input id="priority" name="priority" type="number" value="0" step="1">
+
+        <label for="maxRetries">Max retries <span>(required, 0–100)</span></label>
+        <input id="maxRetries" name="maxRetries" type="number" value="2" min="0" max="100" step="1">
+
+        <label for="scheduledAt">Scheduled at <span>(optional, ISO 8601 with timezone)</span></label>
+        <input id="scheduledAt" name="scheduledAt" placeholder="2030-01-01T00:00:00Z" autocomplete="off">
+
+        <div class="checks">
+          <label><input id="simulateFailure" type="checkbox"> simulateFailure</label>
+          <label><input id="simulateCrashAfterWork" type="checkbox"> simulateCrashAfterWork</label>
+        </div>
+        <button type="submit">Create job</button>
+      </form>
+      <div id="banner" class="banner" hidden></div>
+    </section>
+
+    <section class="panel">
+      <h2>Jobs</h2>
+      <div class="toolbar">
+        <select id="status-filter" aria-label="Filter by status">
+          <option value="">All statuses</option>
+          <option>QUEUED</option>
+          <option>RUNNING</option>
+          <option>SUCCEEDED</option>
+          <option>FAILED</option>
+          <option>CANCELLED</option>
+        </select>
+        <button id="refresh" class="secondary" type="button">Refresh</button>
+        <button id="cancel" class="danger" type="button" disabled>Cancel selected</button>
+      </div>
+      <table>
+        <thead>
+          <tr>
+            <th>Status</th>
+            <th>Type</th>
+            <th>Priority</th>
+            <th>Attempts</th>
+            <th>When</th>
+            <th>Summary</th>
+          </tr>
+        </thead>
+        <tbody id="jobs"></tbody>
+      </table>
+      <pre id="detail">Select a job to see the full response.</pre>
+    </section>
+  </main>
+  <script>
+    const banner = document.querySelector('#banner');
+    const jobsBody = document.querySelector('#jobs');
+    const detail = document.querySelector('#detail');
+    const cancelButton = document.querySelector('#cancel');
+    const typeSelect = document.querySelector('#type');
+    const notificationFields = document.querySelector('#notification-fields');
+    let selectedId = null;
+    let selectedStatus = null;
+
+    function showBanner(message, ok) {
+      banner.hidden = !message;
+      banner.textContent = message || '';
+      banner.classList.toggle('ok', Boolean(ok));
+    }
+
+    async function request(method, path, body) {
+      const response = await fetch(path, {
+        method,
+        headers: body === undefined ? undefined : { 'content-type': 'application/json' },
+        body: body === undefined ? undefined : JSON.stringify(body),
+      });
+      const text = await response.text();
+      let payload = null;
+      if (text) {
+        try {
+          payload = JSON.parse(text);
+        } catch {
+          payload = { error: { message: text } };
+        }
+      }
+      if (!response.ok) {
+        const message = payload && payload.error && payload.error.message
+          ? payload.error.message
+          : response.statusText;
+        const error = new Error(message);
+        error.status = response.status;
+        throw error;
+      }
+      return payload;
+    }
+
+    function summary(job) {
+      if (job.type === 'SEND_NOTIFICATION') return job.payload.recipient || '';
+      if (job.result && job.result.totalAmount != null) return 'total ' + job.result.totalAmount;
+      return '';
+    }
+
+    function renderJobs(jobs) {
+      jobsBody.replaceChildren();
+      if (jobs.length === 0) {
+        const row = document.createElement('tr');
+        const cell = document.createElement('td');
+        cell.colSpan = 6;
+        cell.textContent = 'No jobs for this filter.';
+        row.append(cell);
+        jobsBody.append(row);
+        return;
+      }
+      for (const job of jobs) {
+        const row = document.createElement('tr');
+        row.dataset.id = job.id;
+        row.setAttribute('aria-selected', job.id === selectedId ? 'true' : 'false');
+        const status = document.createElement('td');
+        const pill = document.createElement('span');
+        pill.className = 'status ' + job.status;
+        pill.textContent = job.status;
+        status.append(pill);
+        const cells = [job.type, job.priority, job.attempts, job.scheduledAt, summary(job)];
+        row.append(status, ...cells.map((value) => {
+          const cell = document.createElement('td');
+          cell.textContent = value == null ? '' : String(value);
+          return cell;
+        }));
+        row.addEventListener('click', () => selectJob(job.id));
+        jobsBody.append(row);
+      }
+    }
+
+    async function loadJobs() {
+      const status = document.querySelector('#status-filter').value;
+      const path = status ? '/jobs?status=' + encodeURIComponent(status) : '/jobs';
+      const jobs = await request('GET', path);
+      renderJobs(jobs);
+      if (selectedId && !jobs.some((job) => job.id === selectedId)) {
+        selectedId = null;
+        selectedStatus = null;
+        cancelButton.disabled = true;
+        detail.textContent = 'Select a job to see the full response.';
+      }
+    }
+
+    async function selectJob(id) {
+      const job = await request('GET', '/jobs/' + id);
+      selectedId = job.id;
+      selectedStatus = job.status;
+      cancelButton.disabled = false;
+      detail.textContent = JSON.stringify(job, null, 2);
+      for (const row of jobsBody.querySelectorAll('tr')) {
+        row.setAttribute('aria-selected', row.dataset.id === id ? 'true' : 'false');
+      }
+    }
+
+    typeSelect.addEventListener('change', () => {
+      notificationFields.hidden = typeSelect.value !== 'SEND_NOTIFICATION';
+    });
+
+    document.querySelector('#create-form').addEventListener('submit', async (event) => {
+      event.preventDefault();
+      showBanner('');
+      const form = event.currentTarget;
+      const payload = {};
+      if (form.type.value === 'SEND_NOTIFICATION') {
+        payload.recipient = form.recipient.value;
+        payload.message = form.message.value;
+      }
+      if (document.querySelector('#simulateFailure').checked) payload.simulateFailure = true;
+      if (document.querySelector('#simulateCrashAfterWork').checked) payload.simulateCrashAfterWork = true;
+
+      const body = { type: form.type.value, payload };
+      if (form.priority.value !== '') body.priority = Number(form.priority.value);
+      if (form.maxRetries.value !== '') body.maxRetries = Number(form.maxRetries.value);
+      if (form.scheduledAt.value.trim() !== '') body.scheduledAt = form.scheduledAt.value.trim();
+
+      try {
+        const job = await request('POST', '/jobs', body);
+        showBanner('Created ' + job.id + ' (' + job.status + ')', true);
+        await loadJobs();
+        await selectJob(job.id);
+      } catch (error) {
+        showBanner(error.status + ' ' + error.message);
+      }
+    });
+
+    document.querySelector('#refresh').addEventListener('click', async () => {
+      showBanner('');
+      try {
+        await loadJobs();
+      } catch (error) {
+        showBanner(error.status + ' ' + error.message);
+      }
+    });
+
+    document.querySelector('#status-filter').addEventListener('change', async () => {
+      showBanner('');
+      try {
+        await loadJobs();
+      } catch (error) {
+        showBanner(error.status + ' ' + error.message);
+      }
+    });
+
+    cancelButton.addEventListener('click', async () => {
+      if (!selectedId) return;
+      showBanner('');
+      try {
+        const job = await request('POST', '/jobs/' + selectedId + '/cancel');
+        showBanner('Cancelled ' + job.id, true);
+        await loadJobs();
+        await selectJob(job.id);
+      } catch (error) {
+        showBanner(error.status + ' ' + error.message);
+      }
+    });
+
+    request('GET', '/health')
+      .then(() => { document.querySelector('#health').textContent = 'API is up.'; })
+      .catch(() => { document.querySelector('#health').textContent = 'API health check failed.'; });
+
+    loadJobs().catch((error) => showBanner(error.status + ' ' + error.message));
+  </script>
+</body>
+</html>

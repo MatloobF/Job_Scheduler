@@ -15,7 +15,7 @@ npm install
 npm run migrate               # applies src/db/migrations/*.sql in order
 npm run seed                  # sample sales rows for GENERATE_REPORT
 npm run seed:demo             # dev database: sales rows plus jobs in every status
-npm run dev                   # API on PORT (default 3000)
+npm run dev                   # API and test page on PORT (default 3000)
 npm run worker                # a worker; set WORKER_ID to run several
 npm run reaper                # the lease reaper
 npm test                      # full suite against scheduler_test
@@ -26,6 +26,8 @@ npm test                      # full suite against scheduler_test
 Postgres is published on **`localhost:5433`**, not 5432, so it does not clash with a locally installed PostgreSQL. Credentials for local use are in `.env.example`. `.env` is git-ignored.
 
 Stop the worker or reaper with Ctrl+C. The worker finishes its current job and claims nothing new. The reaper finishes its current pass.
+
+With the API running, open `http://localhost:3000`. That page lists, creates, and cancels jobs through the same `/jobs` routes. Leave `scheduledAt` empty for a job the worker should run now, or set `2030-01-01T00:00:00Z` to keep it queued so Cancel can succeed.
 
 ### Configuration (`.env`)
 

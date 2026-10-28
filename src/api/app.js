@@ -1,7 +1,13 @@
+import path from 'node:path';
+import { fileURLToPath } from 'node:url';
 import express from 'express';
 import { ZodError } from 'zod';
 import { AppError } from './errors.js';
 import { jobsRouter } from './routes/jobs.js';
+
+// Resolved from this file so `npm start` finds the page even if the process
+// was not launched from the project root.
+const publicDir = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../../public');
 
 export function createApp() {
   const app = express();
@@ -12,6 +18,7 @@ export function createApp() {
   });
 
   app.use('/jobs', jobsRouter);
+  app.use(express.static(publicDir));
 
   app.use((err, _req, res, _next) => {
     // Raised by express.json() for a body that is not valid JSON.

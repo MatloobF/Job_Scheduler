@@ -72,3 +72,8 @@ Append one short entry after each implementation step: what was generated, what 
 
 - Added `npm run seed:demo` to the setup commands and a paragraph describing what it writes: the four sales rows, then sample jobs in every status, replacing existing dev-database jobs. Noted that it skips `NODE_ENV=test` and that a running worker will claim the due jobs.
 - No code or tests changed. Checked the paragraph against `src/db/seed.js` and `src/db/seedDemo.js`.
+
+## Step 10: Test page
+
+- Added `public/index.html`, a single page that calls `GET /health`, `GET /jobs`, `POST /jobs`, `GET /jobs/:id`, and `POST /jobs/:id/cancel`. `createApp` serves it with `express.static` after the `/jobs` router, using a path resolved from `app.js`.
+- The page only talks to the HTTP API. Checked in the browser: list load, create a 2030 notification, cancel it, cancel again (409), empty `maxRetries` (400).
