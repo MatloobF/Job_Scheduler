@@ -1,6 +1,7 @@
-import { notImplemented } from '../api/errors.js';
+import { notImplemented, StaleLeaseError } from '../api/errors.js';
 import { config } from '../config.js';
 import { pool, withTransaction } from '../db/pool.js';
+import { backoffDelayMs, shouldRetry } from './retryPolicy.js';
 
 // Every jobs.status change lives here. Routes and the worker call these functions.
 // Multi-statement changes use withTransaction from src/db/pool.js.
@@ -94,24 +95,94 @@ export async function claimNextJob(workerId, leaseDurationMs = config.leaseDurat
   });
 }
 
-// WHERE id = $1 AND lease_id = $2 AND status = 'RUNNING' AND lease_expires_at > now().
-// rowCount === 0 -> StaleLeaseError.
-export async function renewLease(_jobId, _leaseId) {
-  throw notImplemented('renewLease');
+// Extends a lease the caller still holds. The expiry predicate means a lapsed lease
+// cannot be revived: once expired, the job belongs to the reaper.
+export async function renewLease(jobId, leaseId, leaseDurationMs = config.leaseDurationMs) {
+  const { rows, rowCount } = await pool.query(
+    `UPDATE jobs
+     SET lease_expires_at = now() + ($3 * interval '1 millisecond'), updated_at = now()
+     WHERE id = $1 AND lease_id = $2 AND status = 'RUNNING' AND lease_expires_at > now()
+     RETURNING *`,
+    [jobId, leaseId, leaseDurationMs],
+  );
+  if (rowCount === 0) throw new StaleLeaseError();
+  return rows[0];
 }
 
-// Same fence as renew, without the expiry predicate (completion of a still-held lease).
-// Writes result and status SUCCEEDED. Update job_attempts in the same transaction.
-// rowCount === 0 -> StaleLeaseError. Do not write the result if the fence misses.
-export async function completeJob(_jobId, _leaseId, _result) {
-  throw notImplemented('completeJob');
+// Records success for the caller's lease. Pass `client` to run inside the caller's
+// transaction, so a handler's side effect commits or rolls back with this fence.
+// No expiry predicate: if the lease lapsed but nobody reaped or reclaimed the job,
+// lease_id is still ours and no one else is running it, so the result is valid.
+export async function completeJob(jobId, leaseId, result, client) {
+  if (!client) return withTransaction((tx) => completeJob(jobId, leaseId, result, tx));
+
+  const { rows, rowCount } = await client.query(
+    `UPDATE jobs
+     SET status = 'SUCCEEDED', result = $3::jsonb,
+         lease_id = NULL, worker_id = NULL, lease_expires_at = NULL, updated_at = now()
+     WHERE id = $1 AND lease_id = $2 AND status = 'RUNNING'
+     RETURNING *`,
+    // Stringified so pg does not turn a JS array into a Postgres array.
+    [jobId, leaseId, JSON.stringify(result ?? null)],
+  );
+  if (rowCount === 0) throw new StaleLeaseError();
+
+  await closeAttempt(client, leaseId, 'SUCCEEDED', null);
+  return rows[0];
 }
 
-// Same fence. Retry while attempts < 1 + max_retries, otherwise permanent FAILED.
-// Record last_error and the attempt outcome in the same transaction.
-// rowCount === 0 -> StaleLeaseError.
-export async function failJob(_jobId, _leaseId, _errorMessage) {
-  throw notImplemented('failJob');
+// Records a failed attempt for the caller's lease, then retries or fails for good.
+export async function failJob(jobId, leaseId, errorMessage) {
+  return withTransaction(async (client) => {
+    // Fenced read under a row lock: the backoff needs attempts, and nothing can
+    // change the row between this read and the UPDATE in retryOrFail.
+    const locked = await client.query(
+      `SELECT id, lease_id, attempts, max_retries FROM jobs
+       WHERE id = $1 AND lease_id = $2 AND status = 'RUNNING'
+       FOR UPDATE`,
+      [jobId, leaseId],
+    );
+    if (locked.rowCount === 0) throw new StaleLeaseError();
+
+    return retryOrFail(client, locked.rows[0], errorMessage, 'FAILED');
+  });
+}
+
+// Shared by failJob and the reaper so both apply the same retry rule.
+// `job` must be a RUNNING row the caller has locked (id, lease_id, attempts, max_retries).
+async function retryOrFail(client, job, errorMessage, attemptOutcome) {
+  const retry = shouldRetry(job.attempts, job.max_retries);
+  const delayMs = retry
+    ? backoffDelayMs(job.attempts, config.backoffBaseMs, config.backoffCapMs)
+    : 0;
+
+  // The fence is repeated even though the row is locked, so this UPDATE is
+  // correct on its own. Clearing the lease makes the old lease_id dead at once.
+  const { rows, rowCount } = await client.query(
+    `UPDATE jobs
+     SET status = CASE WHEN $3::boolean THEN 'QUEUED' ELSE 'FAILED' END,
+         scheduled_at = CASE WHEN $3::boolean
+                          THEN now() + ($4 * interval '1 millisecond')
+                          ELSE scheduled_at END,
+         lease_id = NULL, worker_id = NULL, lease_expires_at = NULL,
+         last_error = $5, updated_at = now()
+     WHERE id = $1 AND lease_id = $2 AND status = 'RUNNING'
+     RETURNING *`,
+    [job.id, job.lease_id, retry, delayMs, errorMessage],
+  );
+  if (rowCount === 0) throw new StaleLeaseError();
+
+  await closeAttempt(client, job.lease_id, attemptOutcome, errorMessage);
+  return rows[0];
+}
+
+// Each lease maps to exactly one attempt row; only an open (RUNNING) one is closed.
+async function closeAttempt(client, leaseId, outcome, error) {
+  await client.query(
+    `UPDATE job_attempts SET outcome = $2, error = $3, finished_at = now()
+     WHERE lease_id = $1 AND outcome = 'RUNNING'`,
+    [leaseId, outcome, error],
+  );
 }
 
 // Expired RUNNING leases become QUEUED (with backoff) or FAILED.

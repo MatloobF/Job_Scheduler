@@ -1,24 +1,23 @@
 import { afterAll, beforeEach, describe, expect, it } from 'vitest';
 import { closePool, pool } from '../src/db/pool.js';
-import { claimNextJob, insertJob } from '../src/jobs/repository.js';
-import { truncateAll } from './helpers.js';
+import { StaleLeaseError } from '../src/api/errors.js';
+import { claimNextJob, completeJob, failJob, renewLease } from '../src/jobs/repository.js';
+import {
+  createTestJob as createJob,
+  expireLease,
+  makeDue,
+  scheduleAt,
+  truncateAll,
+} from './helpers.js';
 
-function createJob(overrides = {}) {
-  return insertJob({
-    type: 'GENERATE_REPORT',
-    payload: {},
-    priority: 0,
-    maxRetries: 3,
-    ...overrides,
-  });
-}
-
-// Moves scheduled_at relative to the DB clock, so tests never depend on the app clock.
-async function scheduleAt(jobId, offset) {
-  await pool.query(`UPDATE jobs SET scheduled_at = now() + $2::interval WHERE id = $1`, [
-    jobId,
-    offset,
-  ]);
+// Claims, fails (requeue), and reclaims a job so the first lease is stale.
+async function claimTwice() {
+  const job = await createJob();
+  const first = await claimNextJob('worker-old');
+  await failJob(job.id, first.lease_id, 'first attempt failed');
+  await makeDue(job.id);
+  const second = await claimNextJob('worker-new');
+  return { job, oldLease: first.lease_id, current: second };
 }
 
 beforeEach(truncateAll);
@@ -83,8 +82,8 @@ describe('atomic claim', () => {
     const job = await createJob();
 
     const first = await claimNextJob('worker-a');
-    // Stand-in for a requeue until failJob and the reaper exist.
-    await pool.query(`UPDATE jobs SET status = 'QUEUED' WHERE id = $1`, [job.id]);
+    await failJob(job.id, first.lease_id, 'boom');
+    await makeDue(job.id);
     const second = await claimNextJob('worker-b');
 
     expect(first).toMatchObject({ id: job.id, attempts: 1, worker_id: 'worker-a', status: 'RUNNING' });
@@ -155,8 +154,69 @@ describe('atomic claim', () => {
 });
 
 describe('leases and stale workers', () => {
-  it.todo('renews a live lease');
-  it.todo('rejects renew, complete, and fail after the lease id changes');
+  it('renews a live lease from the DB clock', async () => {
+    const job = await createJob();
+    const claimed = await claimNextJob('worker-a', 1000);
+
+    const renewed = await renewLease(job.id, claimed.lease_id, 30_000);
+
+    expect(renewed.lease_id).toBe(claimed.lease_id);
+    const { rows } = await pool.query(
+      `SELECT lease_expires_at - updated_at AS duration FROM jobs WHERE id = $1`,
+      [job.id],
+    );
+    expect(rows[0].duration).toEqual({ seconds: 30 });
+  });
+
+  it('refuses to revive an expired lease', async () => {
+    const job = await createJob();
+    const claimed = await claimNextJob('worker-a');
+    await expireLease(job.id);
+
+    await expect(renewLease(job.id, claimed.lease_id)).rejects.toBeInstanceOf(StaleLeaseError);
+
+    const { rows } = await pool.query(
+      'SELECT lease_expires_at < now() AS expired FROM jobs WHERE id = $1',
+      [job.id],
+    );
+    expect(rows[0].expired).toBe(true);
+  });
+
+  it('rejects renew, complete, and fail after the lease id changes', async () => {
+    const { job, oldLease, current } = await claimTwice();
+
+    await expect(renewLease(job.id, oldLease)).rejects.toBeInstanceOf(StaleLeaseError);
+    await expect(completeJob(job.id, oldLease, { stale: true })).rejects.toBeInstanceOf(
+      StaleLeaseError,
+    );
+    await expect(failJob(job.id, oldLease, 'stale failure')).rejects.toBeInstanceOf(
+      StaleLeaseError,
+    );
+
+    // The current attempt is untouched by any of the stale writes.
+    const { rows } = await pool.query('SELECT * FROM jobs WHERE id = $1', [job.id]);
+    expect(rows[0]).toMatchObject({
+      status: 'RUNNING',
+      lease_id: current.lease_id,
+      attempts: 2,
+      result: null,
+      last_error: 'first attempt failed',
+    });
+  });
+
+  it('rejects every write once the job has left RUNNING', async () => {
+    const job = await createJob();
+    const claimed = await claimNextJob('worker-a');
+    await completeJob(job.id, claimed.lease_id, { ok: true });
+
+    await expect(renewLease(job.id, claimed.lease_id)).rejects.toBeInstanceOf(StaleLeaseError);
+    await expect(completeJob(job.id, claimed.lease_id, {})).rejects.toBeInstanceOf(
+      StaleLeaseError,
+    );
+    await expect(failJob(job.id, claimed.lease_id, 'late')).rejects.toBeInstanceOf(
+      StaleLeaseError,
+    );
+  });
   it.todo('requeues a job whose lease has expired and still has retries');
   it.todo('permanently fails an expired lease when retries are exhausted');
   it.todo('does not leave the job RUNNING after the reaper runs');
