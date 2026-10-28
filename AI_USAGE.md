@@ -67,3 +67,8 @@ Append one short entry after each implementation step: what was generated, what 
 
 - Claude Code drafted the README engineering notes (architecture and schema, claim safety, leases and fencing, retry and idempotency, crash-point table, limitations, AI usage and verification) plus setup, configuration and API reference, from the implemented code and the test and mutation results recorded above.
 - Checked against the code: claim SQL copied from `repository.js`, fence table matches each function's WHERE clause, test count (81) and mutation results match the runs logged in steps 3–7, and the only "exactly-once" wording is a negation.
+
+## Step 9: Demo seed in the README
+
+- Added `npm run seed:demo` to the setup commands and a paragraph describing what it writes: the four sales rows, then sample jobs in every status, replacing existing dev-database jobs. Noted that it skips `NODE_ENV=test` and that a running worker will claim the due jobs.
+- No code or tests changed. Checked the paragraph against `src/db/seed.js` and `src/db/seedDemo.js`.

@@ -14,11 +14,14 @@ docker compose up -d          # Postgres 16 with databases scheduler and schedul
 npm install
 npm run migrate               # applies src/db/migrations/*.sql in order
 npm run seed                  # sample sales rows for GENERATE_REPORT
+npm run seed:demo             # dev database: sales rows plus jobs in every status
 npm run dev                   # API on PORT (default 3000)
 npm run worker                # a worker; set WORKER_ID to run several
 npm run reaper                # the lease reaper
 npm test                      # full suite against scheduler_test
 ```
+
+`npm run seed` loads four sales rows for `GENERATE_REPORT`: widgets 10 and 15, gadgets 7 and 3. `npm run seed:demo` loads those same rows, then replaces every job in the dev database with a sample set: succeeded notifications and reports, a job that failed once and then succeeded, a permanent failure, a crash that was recovered, a crash that became `FAILED`, a cancelled job, and jobs left `QUEUED` until 2030. `GET /jobs` and `POST /jobs/:id/cancel` can be tried against that set. The script refuses to run when `NODE_ENV=test`. Stop the worker before running it if the due jobs should stay `QUEUED`; the 2030 jobs stay queued either way. Running it again clears the previous sample jobs and inserts a new set with new ids.
 
 Postgres is published on **`localhost:5433`**, not 5432, so it does not clash with a locally installed PostgreSQL. Credentials for local use are in `.env.example`. `.env` is git-ignored.
 
