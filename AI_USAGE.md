@@ -83,3 +83,14 @@ Append one short entry after each implementation step: what was generated, what 
 - `npm run worker` now runs `src/worker/workers.js`, which spawns `WORKER_COUNT` separate `worker.js` processes (default 3) with ids `worker-1` through `worker-3`. `WORKER_COUNT=1` keeps a single process using `WORKER_ID`.
 - Claim, lease, and `runWorker` are unchanged. Separate processes so one `process.exit` from a simulated crash does not kill the other workers, and they do not share the module-level `stop()` flag.
 - Verified: `tests/worker.test.js`. Startup log shows three `worker worker-N started` lines.
+
+## Step 12: Render process launcher
+
+- Added `src/start.js` and `npm run start:all`. The launcher spawns `server.js`, `reaper.js`, and one `worker.js` per `WORKER_COUNT` (ids `worker-1` onward). A worker or reaper exit is replaced after one second. An API exit signals the others and exits this process so Render restarts the whole service.
+- `npm start`, `npm run worker`, and `npm run reaper` are unchanged. Claim, lease, and crash handling are unchanged.
+- Verified: `node --check src/start.js`. Not started against the dev database, because a reaper was already running.
+
+## Step 13: README note for the launcher
+
+- Added `npm run start:all` to the setup commands and a paragraph: `src/start.js` spawns the existing API, reaper, and worker processes; a worker exit is replaced; an API exit ends the parent.
+- The architecture section still says those roles are separate processes. No code or tests changed.

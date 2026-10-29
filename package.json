@@ -12,6 +12,7 @@
     "seed:demo": "node src/db/seedDemo.js",
     "dev": "node --watch src/api/server.js",
     "start": "node src/api/server.js",
+    "start:all": "node src/start.js",
     "worker": "node src/worker/workers.js",
     "reaper": "node src/worker/reaper.js",
     "test": "vitest run"

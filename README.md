@@ -18,6 +18,7 @@ npm run seed:demo             # dev database: sales rows plus jobs in every stat
 npm run dev                   # API and test page on PORT (default 3000)
 npm run worker                # WORKER_COUNT processes (default 3)
 npm run reaper                # the lease reaper
+npm run start:all             # API, workers, and reaper under one parent process
 npm test                      # full suite against scheduler_test
 ```
 
@@ -26,6 +27,8 @@ npm test                      # full suite against scheduler_test
 Postgres is published on **`localhost:5433`**, not 5432, so it does not clash with a locally installed PostgreSQL. Credentials for local use are in `.env.example`. `.env` is git-ignored.
 
 `npm run worker` starts `WORKER_COUNT` worker processes, default 3, with ids `worker-1`, `worker-2`, and `worker-3`. Each process claims on its own, so a crash in one does not stop the others. Set `WORKER_COUNT=1` to run a single worker, which then uses `WORKER_ID`.
+
+`npm run start:all` runs [`src/start.js`](src/start.js), which spawns the API, the reaper, and one `worker.js` process per `WORKER_COUNT`. Those are still separate processes. A worker crash exits only that process, and the parent starts another with the same id one second later. The job it was running stays `RUNNING` until the lease expires, and the reaper recovers it. If the API process exits, the parent exits too, so a host that restarts a dead service brings the API, the workers, and the reaper back together. Locally, `npm run dev`, `npm run worker`, and `npm run reaper` remain the way to run each one on its own.
 
 Stop the workers or reaper with Ctrl+C. A worker finishes its current job and claims nothing new. The reaper finishes its current pass. On Windows, Ctrl+C can terminate a child worker without running that shutdown, so a job it was running is recovered by the reaper after the lease expires.
 
