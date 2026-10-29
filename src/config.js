@@ -17,6 +17,8 @@ export const config = {
   databaseUrlTest: process.env.DATABASE_URL_TEST ?? '',
   port: integer('PORT', 3000),
   workerId: process.env.WORKER_ID || 'worker-1',
+  // How many worker processes `npm run worker` starts. Each process claims on its own.
+  workerCount: integer('WORKER_COUNT', 3),
   leaseDurationMs: integer('LEASE_DURATION_MS', 30_000),
   pollIntervalMs: integer('POLL_INTERVAL_MS', 1000),
   reaperIntervalMs: integer('REAPER_INTERVAL_MS', 5000),

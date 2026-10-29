@@ -16,7 +16,7 @@ npm run migrate               # applies src/db/migrations/*.sql in order
 npm run seed                  # sample sales rows for GENERATE_REPORT
 npm run seed:demo             # dev database: sales rows plus jobs in every status
 npm run dev                   # API and test page on PORT (default 3000)
-npm run worker                # a worker; set WORKER_ID to run several
+npm run worker                # WORKER_COUNT processes (default 3)
 npm run reaper                # the lease reaper
 npm test                      # full suite against scheduler_test
 ```
@@ -25,7 +25,9 @@ npm test                      # full suite against scheduler_test
 
 Postgres is published on **`localhost:5433`**, not 5432, so it does not clash with a locally installed PostgreSQL. Credentials for local use are in `.env.example`. `.env` is git-ignored.
 
-Stop the worker or reaper with Ctrl+C. The worker finishes its current job and claims nothing new. The reaper finishes its current pass.
+`npm run worker` starts `WORKER_COUNT` worker processes, default 3, with ids `worker-1`, `worker-2`, and `worker-3`. Each process claims on its own, so a crash in one does not stop the others. Set `WORKER_COUNT=1` to run a single worker, which then uses `WORKER_ID`.
+
+Stop the workers or reaper with Ctrl+C. A worker finishes its current job and claims nothing new. The reaper finishes its current pass. On Windows, Ctrl+C can terminate a child worker without running that shutdown, so a job it was running is recovered by the reaper after the lease expires.
 
 With the API running, open `http://localhost:3000`. That page lists, creates, and cancels jobs through the same `/jobs` routes. Leave `scheduledAt` empty for a job the worker should run now, or set `2030-01-01T00:00:00Z` to keep it queued so Cancel can succeed.
 

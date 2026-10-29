@@ -77,3 +77,9 @@ Append one short entry after each implementation step: what was generated, what 
 
 - Added `public/index.html`, a single page that calls `GET /health`, `GET /jobs`, `POST /jobs`, `GET /jobs/:id`, and `POST /jobs/:id/cancel`. `createApp` serves it with `express.static` after the `/jobs` router, using a path resolved from `app.js`.
 - The page only talks to the HTTP API. Checked in the browser: list load, create a 2030 notification, cancel it, cancel again (409), empty `maxRetries` (400).
+
+## Step 11: Three workers from one command
+
+- `npm run worker` now runs `src/worker/workers.js`, which spawns `WORKER_COUNT` separate `worker.js` processes (default 3) with ids `worker-1` through `worker-3`. `WORKER_COUNT=1` keeps a single process using `WORKER_ID`.
+- Claim, lease, and `runWorker` are unchanged. Separate processes so one `process.exit` from a simulated crash does not kill the other workers, and they do not share the module-level `stop()` flag.
+- Verified: `tests/worker.test.js`. Startup log shows three `worker worker-N started` lines.
